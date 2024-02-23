@@ -1,0 +1,42 @@
+<?php
+/**
+ * Plugin Name: WPSmart-Career-Profile
+ * Plugin URI: https://tech.pefy-consulting.com
+ * Description: Enhance career profiles with AI-generated content suggestions.
+ * Version: 1.0
+ * Author: (R) PEFY-TECH & Erick-Franck P.
+ * Author URI: https://tech.pefy-consulting.com
+ * License: GPL2
+ * License URI: https://www.gnu.org/licenses/gpl-2.0.html
+ * Text Domain: wpscp
+ * Domain Path: /languages
+ */
+
+// Enqueue styles
+function wpscp_enqueue_styles() {
+    wp_enqueue_style('wpscp-style', plugin_dir_url(__FILE__) . 'style.css');
+}
+add_action('wp_enqueue_scripts', 'wpscp_enqueue_styles');
+
+// Shortcode for displaying the profile form
+function wpscp_profile_form_shortcode() {
+    ob_start();
+    include_once(plugin_dir_path(__FILE__) . 'templates/form.php');
+    return ob_get_clean();
+}
+add_shortcode('wpscp_profile_form', 'wpscp_profile_form_shortcode');
+
+// Function to process form submission
+function wpscp_process_form() {
+    // Process form submission here
+}
+add_action('init', 'wpscp_process_form');
+
+// Header for single post
+function wpscp_header_single_post($content) {
+    if (is_single()) {
+        $content .= '<div class="wpscp-follow-us">If you liked this career profile form, follow us on <a href="https://twitter.com/pefy_consulting" title="PEFY-Consulting Global on Twitter" target="_blank" rel="nofollow">Twitter</a>, <a href="https://www.facebook.com/PEFY.Consulting" title="PEFY-Consulting Global on Facebook" target="_blank" rel="nofollow">Facebook</a>, <a href="https://www.linkedin.com/company/pefy-consulting-global" title="PEFY-Consulting Global on LinkedIn" target="_blank" rel="nofollow">LinkedIn</a>, and <a href="https://www.instagram.com/pefyconsultingglobal/" title="PEFY-Consulting Global on Instagram" target="_blank" rel="nofollow">Instagram</a>.</div>';
+    }
+    return $content;
+}
+add_filter('the_content', 'wpscp_header_single_post');
