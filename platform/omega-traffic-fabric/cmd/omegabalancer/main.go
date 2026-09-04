@@ -24,6 +24,7 @@ type metrics struct {
 	active   atomic.Int64
 	failed   atomic.Uint64
 	proxied  atomic.Uint64
+	rejected atomic.Uint64
 }
 
 func main() {
@@ -34,7 +35,21 @@ func main() {
 	healthEvery := flag.Duration("health-interval", 5*time.Second, "active TCP health-check interval")
 	dialTimeout := flag.Duration("dial-timeout", 2*time.Second, "backend dial timeout")
 	drainTimeout := flag.Duration("drain-timeout", 30*time.Second, "graceful drain timeout")
+	maxConnections := flag.Int("max-connections", 10000, "maximum concurrent proxied connections")
 	flag.Parse()
+
+	if *maxConnections < 1 {
+		log.Fatal("max-connections must be at least 1")
+	}
+	if *healthEvery <= 0 {
+		log.Fatal("health-interval must be greater than zero")
+	}
+	if *dialTimeout <= 0 {
+		log.Fatal("dial-timeout must be greater than zero")
+	}
+	if *drainTimeout <= 0 {
+		log.Fatal("drain-timeout must be greater than zero")
+	}
 
 	addrs := splitBackends(*rawBackends)
 	pool, err := balancer.NewPool(addrs, balancer.Algorithm(*algorithm))
@@ -59,6 +74,7 @@ func main() {
 	log.Printf("ΩBALANCER bootstrap data plane listening on %s with %d backends using %s", *listen, len(pool.Backends()), *algorithm)
 
 	var wg sync.WaitGroup
+	capacity := make(chan struct{}, *maxConnections)
 	go func() {
 		<-ctx.Done()
 		_ = ln.Close()
@@ -74,11 +90,18 @@ func main() {
 			continue
 		}
 		m.accepted.Add(1)
-		wg.Add(1)
-		go func(c net.Conn) {
-			defer wg.Done()
-			handleConn(ctx, c, pool, m, *dialTimeout)
-		}(conn)
+		select {
+		case capacity <- struct{}{}:
+			wg.Add(1)
+			go func(c net.Conn) {
+				defer wg.Done()
+				defer func() { <-capacity }()
+				handleConn(ctx, c, pool, m, *dialTimeout)
+			}(conn)
+		default:
+			m.rejected.Add(1)
+			_ = conn.Close()
+		}
 	}
 
 	done := make(chan struct{})
@@ -103,32 +126,52 @@ func splitBackends(v string) []string {
 
 func handleConn(ctx context.Context, downstream net.Conn, pool *balancer.Pool, m *metrics, timeout time.Duration) {
 	defer downstream.Close()
+
 	backend := pool.Pick(downstream.RemoteAddr().String())
 	if backend == nil {
 		m.failed.Add(1)
 		return
 	}
-	backend.Acquire()
-	defer backend.Release()
-	m.active.Add(1)
-	defer m.active.Add(-1)
 
-	upstream, err := net.DialTimeout("tcp", backend.Addr, timeout)
-	if err != nil {
-		backend.SetHealthy(false)
+	upstream, backend := dialSelectedBackend(pool, backend, downstream.RemoteAddr().String(), timeout)
+	if upstream == nil || backend == nil {
 		m.failed.Add(1)
 		return
 	}
 	defer upstream.Close()
 
+	backend.Acquire()
+	defer backend.Release()
+	m.active.Add(1)
+	defer m.active.Add(-1)
+
 	copyDone := make(chan struct{}, 2)
 	go copyStream(upstream, downstream, copyDone)
 	go copyStream(downstream, upstream, copyDone)
-	select {
-	case <-copyDone:
-	case <-ctx.Done():
+
+	completed := 0
+	for completed < 2 {
+		select {
+		case <-copyDone:
+			completed++
+		case <-ctx.Done():
+			return
+		}
 	}
 	m.proxied.Add(1)
+}
+
+func dialSelectedBackend(pool *balancer.Pool, first *balancer.Backend, key string, timeout time.Duration) (net.Conn, *balancer.Backend) {
+	candidate := first
+	for attempt := 0; attempt < 2 && candidate != nil; attempt++ {
+		conn, err := net.DialTimeout("tcp", candidate.Addr, timeout)
+		if err == nil {
+			return conn, candidate
+		}
+		candidate.SetHealthy(false)
+		candidate = pool.Pick(key)
+	}
+	return nil, nil
 }
 
 func copyStream(dst, src net.Conn, done chan<- struct{}) {
@@ -171,15 +214,20 @@ func serveObservability(ctx context.Context, addr string, pool *balancer.Pool, m
 				healthy++
 			}
 		}
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		w.Header().Set("Cache-Control", "no-store")
 		if healthy == 0 {
 			w.WriteHeader(http.StatusServiceUnavailable)
 		}
 		_, _ = fmt.Fprintf(w, "healthy_backends=%d total_backends=%d\n", healthy, len(pool.Backends()))
 	})
 	mux.HandleFunc("/metrics", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
+		w.Header().Set("Cache-Control", "no-store")
 		_, _ = fmt.Fprintf(w, "omega_connections_accepted_total %d\n", m.accepted.Load())
 		_, _ = fmt.Fprintf(w, "omega_connections_active %d\n", m.active.Load())
 		_, _ = fmt.Fprintf(w, "omega_proxy_failures_total %d\n", m.failed.Load())
+		_, _ = fmt.Fprintf(w, "omega_connections_rejected_total %d\n", m.rejected.Load())
 		_, _ = fmt.Fprintf(w, "omega_connections_proxied_total %d\n", m.proxied.Load())
 		for i, b := range pool.Backends() {
 			health := 0
@@ -190,7 +238,14 @@ func serveObservability(ctx context.Context, addr string, pool *balancer.Pool, m
 			_, _ = fmt.Fprintf(w, "omega_backend_active_connections{backend=\"%d\"} %d\n", i, b.Active())
 		}
 	})
-	srv := &http.Server{Addr: addr, Handler: mux, ReadHeaderTimeout: 3 * time.Second}
+	srv := &http.Server{
+		Addr:              addr,
+		Handler:           mux,
+		ReadHeaderTimeout: 3 * time.Second,
+		ReadTimeout:       5 * time.Second,
+		WriteTimeout:      5 * time.Second,
+		IdleTimeout:       30 * time.Second,
+	}
 	go func() {
 		<-ctx.Done()
 		shutdown, cancel := context.WithTimeout(context.Background(), 3*time.Second)
