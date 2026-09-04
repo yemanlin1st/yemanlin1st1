@@ -3,7 +3,6 @@ package balancer
 import (
 	"errors"
 	"hash/fnv"
-	"math"
 	"strings"
 	"sync/atomic"
 )
@@ -71,51 +70,56 @@ func NewPool(addrs []string, algo Algorithm) (*Pool, error) {
 
 func (p *Pool) Backends() []*Backend { return p.backends }
 
-func (p *Pool) healthyIndices() []int {
-	out := make([]int, 0, len(p.backends))
-	for i, b := range p.backends {
-		if b.Healthy() {
-			out = append(out, i)
-		}
-	}
-	return out
-}
-
 func (p *Pool) Pick(key string) *Backend {
-	healthy := p.healthyIndices()
-	if len(healthy) == 0 {
-		return nil
-	}
-	if len(healthy) == 1 {
-		return p.backends[healthy[0]]
-	}
 	switch p.algo {
 	case RoundRobin:
-		n := p.rr.Add(1) - 1
-		return p.backends[healthy[int(n%uint64(len(healthy)))]]
+		count := p.healthyCount()
+		if count == 0 {
+			return nil
+		}
+		n := int((p.rr.Add(1) - 1) % uint64(count))
+		return p.healthyByOrdinal(n)
 	case LeastConn:
-		best := healthy[0]
-		bestLoad := p.backends[best].Active()
-		for _, idx := range healthy[1:] {
-			if load := p.backends[idx].Active(); load < bestLoad {
-				best, bestLoad = idx, load
+		var best *Backend
+		var bestLoad int64
+		for _, b := range p.backends {
+			if !b.Healthy() {
+				continue
+			}
+			load := b.Active()
+			if best == nil || load < bestLoad {
+				best, bestLoad = b, load
 			}
 		}
-		return p.backends[best]
+		return best
 	case PowerOfTwo:
+		count := p.healthyCount()
+		if count == 0 {
+			return nil
+		}
+		if count == 1 {
+			return p.healthyByOrdinal(0)
+		}
 		x := p.entropy.Add(0x9e3779b97f4a7c15)
-		a := healthy[int(mix64(x)%uint64(len(healthy)))]
-		b := healthy[int(mix64(x^0xbf58476d1ce4e5b9)%uint64(len(healthy)))]
-		if a == b {
-			b = healthy[(indexOf(healthy, a)+1)%len(healthy)]
+		aOrd := int(mix64(x) % uint64(count))
+		bOrd := int(mix64(x^0xbf58476d1ce4e5b9) % uint64(count))
+		if aOrd == bOrd {
+			bOrd = (bOrd + 1) % count
 		}
-		if p.backends[a].Active() <= p.backends[b].Active() {
-			return p.backends[a]
+		a := p.healthyByOrdinal(aOrd)
+		b := p.healthyByOrdinal(bOrd)
+		if a == nil {
+			return b
 		}
-		return p.backends[b]
+		if b == nil || a.Active() <= b.Active() {
+			return a
+		}
+		return b
 	case Maglev:
-		h := hash64(key)
-		start := int(h % uint64(len(p.maglev)))
+		if len(p.maglev) == 0 {
+			return nil
+		}
+		start := int(hash64(key) % uint64(len(p.maglev)))
 		for i := 0; i < len(p.maglev); i++ {
 			idx := p.maglev[(start+i)%len(p.maglev)]
 			if idx >= 0 && p.backends[idx].Healthy() {
@@ -126,13 +130,31 @@ func (p *Pool) Pick(key string) *Backend {
 	return nil
 }
 
-func indexOf(v []int, needle int) int {
-	for i, x := range v {
-		if x == needle {
-			return i
+func (p *Pool) healthyCount() int {
+	count := 0
+	for _, b := range p.backends {
+		if b.Healthy() {
+			count++
 		}
 	}
-	return 0
+	return count
+}
+
+func (p *Pool) healthyByOrdinal(ordinal int) *Backend {
+	if ordinal < 0 {
+		return nil
+	}
+	seen := 0
+	for _, b := range p.backends {
+		if !b.Healthy() {
+			continue
+		}
+		if seen == ordinal {
+			return b
+		}
+		seen++
+	}
+	return nil
 }
 
 func hash64(s string) uint64 {
@@ -190,8 +212,12 @@ func buildMaglev(backends []*Backend, m int) []int {
 }
 
 func gcd(a, b int) int {
-	a = int(math.Abs(float64(a)))
-	b = int(math.Abs(float64(b)))
+	if a < 0 {
+		a = -a
+	}
+	if b < 0 {
+		b = -b
+	}
 	for b != 0 {
 		a, b = b, a%b
 	}
