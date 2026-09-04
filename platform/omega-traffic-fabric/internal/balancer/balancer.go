@@ -71,14 +71,15 @@ func NewPool(addrs []string, algo Algorithm) (*Pool, error) {
 func (p *Pool) Backends() []*Backend { return p.backends }
 
 func (p *Pool) Pick(key string) *Backend {
+	n := len(p.backends)
+	if n == 0 {
+		return nil
+	}
+
 	switch p.algo {
 	case RoundRobin:
-		count := p.healthyCount()
-		if count == 0 {
-			return nil
-		}
-		n := int((p.rr.Add(1) - 1) % uint64(count))
-		return p.healthyByOrdinal(n)
+		start := int((p.rr.Add(1) - 1) % uint64(n))
+		return p.nextHealthy(start)
 	case LeastConn:
 		var best *Backend
 		var bestLoad int64
@@ -93,25 +94,21 @@ func (p *Pool) Pick(key string) *Backend {
 		}
 		return best
 	case PowerOfTwo:
-		count := p.healthyCount()
-		if count == 0 {
+		x := p.entropy.Add(0x9e3779b97f4a7c15)
+		aStart := int(mix64(x) % uint64(n))
+		bStart := int(mix64(x^0xbf58476d1ce4e5b9) % uint64(n))
+		a := p.nextHealthy(aStart)
+		if a == nil {
 			return nil
 		}
-		if count == 1 {
-			return p.healthyByOrdinal(0)
+		if n == 1 {
+			return a
 		}
-		x := p.entropy.Add(0x9e3779b97f4a7c15)
-		aOrd := int(mix64(x) % uint64(count))
-		bOrd := int(mix64(x^0xbf58476d1ce4e5b9) % uint64(count))
-		if aOrd == bOrd {
-			bOrd = (bOrd + 1) % count
+		if bStart == aStart {
+			bStart = (bStart + 1) % n
 		}
-		a := p.healthyByOrdinal(aOrd)
-		b := p.healthyByOrdinal(bOrd)
-		if a == nil {
-			return b
-		}
-		if b == nil || a.Active() <= b.Active() {
+		b := p.nextHealthy(bStart)
+		if b == nil || b == a || a.Active() <= b.Active() {
 			return a
 		}
 		return b
@@ -130,29 +127,20 @@ func (p *Pool) Pick(key string) *Backend {
 	return nil
 }
 
-func (p *Pool) healthyCount() int {
-	count := 0
-	for _, b := range p.backends {
-		if b.Healthy() {
-			count++
-		}
-	}
-	return count
-}
-
-func (p *Pool) healthyByOrdinal(ordinal int) *Backend {
-	if ordinal < 0 {
+func (p *Pool) nextHealthy(start int) *Backend {
+	n := len(p.backends)
+	if n == 0 {
 		return nil
 	}
-	seen := 0
-	for _, b := range p.backends {
-		if !b.Healthy() {
-			continue
-		}
-		if seen == ordinal {
+	if start < 0 {
+		start = 0
+	}
+	start %= n
+	for i := 0; i < n; i++ {
+		b := p.backends[(start+i)%n]
+		if b.Healthy() {
 			return b
 		}
-		seen++
 	}
 	return nil
 }
