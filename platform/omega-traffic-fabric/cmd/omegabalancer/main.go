@@ -31,7 +31,7 @@ func main() {
 	listen := flag.String("listen", envOr("OMEGA_LISTEN", ":8080"), "TCP listen address")
 	rawBackends := flag.String("backends", envOr("OMEGA_BACKENDS", "127.0.0.1:8081,127.0.0.1:8082"), "comma-separated backends")
 	algorithm := flag.String("algorithm", envOr("OMEGA_ALGORITHM", "p2c"), "round-robin|least-connections|p2c|maglev")
-	metricsAddr := flag.String("metrics", envOr("OMEGA_METRICS", ":9090"), "metrics/health HTTP address; empty disables")
+	metricsAddr := flag.String("metrics", envOr("OMEGA_METRICS", "127.0.0.1:9090"), "metrics/health HTTP address; empty disables")
 	healthEvery := flag.Duration("health-interval", 5*time.Second, "active TCP health-check interval")
 	dialTimeout := flag.Duration("dial-timeout", 2*time.Second, "backend dial timeout")
 	drainTimeout := flag.Duration("drain-timeout", 30*time.Second, "graceful drain timeout")
