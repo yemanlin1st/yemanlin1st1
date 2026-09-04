@@ -1,6 +1,9 @@
 package balancer
 
-import "testing"
+import (
+	"fmt"
+	"testing"
+)
 
 func TestRoundRobin(t *testing.T) {
 	p, err := NewPool([]string{"a:1", "b:2", "c:3"}, RoundRobin)
@@ -57,6 +60,18 @@ func BenchmarkP2C(b *testing.B) {
 
 func BenchmarkMaglev(b *testing.B) {
 	p, _ := NewPool([]string{"a:1", "b:2", "c:3", "d:4"}, Maglev)
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_ = p.Pick("bench")
+	}
+}
+
+func BenchmarkP2CLargePool(b *testing.B) {
+	addrs := make([]string, 4096)
+	for i := range addrs {
+		addrs[i] = fmt.Sprintf("10.0.%d.%d:8080", (i/254)%254, (i%254)+1)
+	}
+	p, _ := NewPool(addrs, PowerOfTwo)
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		_ = p.Pick("bench")
