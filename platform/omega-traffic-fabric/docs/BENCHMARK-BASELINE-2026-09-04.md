@@ -21,7 +21,7 @@ Recent ecosystem evidence demonstrates why ΩEVOLVE must separate discovery from
 - An August 2026 Pingora dependency issue records a RustSec unsoundness advisory in an `lru` version used by the workspace, illustrating that a project can be current while still carrying dependency findings requiring assessment.
 - HAProxy published fixes in February 2026 for two high-severity QUIC denial-of-service vulnerabilities.
 
-Therefore all ΩTF production upgrades require provenance, dependency/advisory review, reproducible tests, benchmark regression gates, canary observation and rollback readiness.
+Therefore all ΩTF production upgrades require provenance, dependency/advisory review, reproducible tests, benchmark regression gates, canary observation and rollback readiness. TUF-style update trust and SLSA-compatible build provenance are part of the target release-control model.
 
 ## Local bootstrap verification
 
@@ -32,17 +32,22 @@ Verification commands:
 ```text
 go test ./...
 go vet ./...
-go test -bench=. -benchmem ./internal/balancer
+go test -race ./...
+go test -bench='P2C|Maglev' -benchmem ./internal/balancer
 ```
 
-Results after hot-path allocation removal and TCP half-close/failover fixes:
+Results after hot-path redesign, TCP half-close/failover fixes, overload shedding and observability hardening:
 
 | Test | Result |
 |---|---:|
 | Unit + integration tests | PASS |
 | `go vet` | PASS |
-| P2C selector | ~34.12 ns/op, 0 B/op, 0 allocs/op |
-| Maglev lookup | ~9.36 ns/op, 0 B/op, 0 allocs/op |
+| Go race detector | PASS |
+| P2C selector — 4 backends | ~16.03 ns/op, 0 B/op, 0 allocs/op |
+| P2C selector — 4,096 backends | ~12.69 ns/op, 0 B/op, 0 allocs/op |
+| Maglev lookup | ~8.75 ns/op, 0 B/op, 0 allocs/op |
+
+The P2C design uses direct randomized probing: O(1) typical selection for healthy pools with bounded O(N) probing only when searching across unhealthy nodes. Least-connections remains intentionally O(N). Maglev uses a prebuilt lookup table.
 
 These numbers measure only in-process backend selection on this host. They are not packets-per-second, requests-per-second, latency SLO, or production throughput claims.
 
